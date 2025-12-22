@@ -40,18 +40,34 @@ DEFAULT_CONFIG = {
     "initial_messages": [{"role": "system", "content": "你是一个冷酷的暗夜刀锋GM。"}],
 }
 
+def get_config(key, default=None):
+    """
+    优先从系统环境变量获取 (Zeabur/Docker)，
+    获取不到则尝试从 st.secrets 获取 (Local)，
+    最后返回默认值。
+    """
+    # 1. 尝试系统环境变量 (Zeabur)
+    value = os.environ.get(key)
+    if value:
+        return value
+    
+    # 2. 尝试 st.secrets (Local)
+    # 注意：st.secrets 可能会报错如果key不存在，所以用 .get()
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except FileNotFoundError:
+        pass # 本地没有 secrets.toml 文件
+        
+    return default
+
 
 def get_api_client():
     """获取 OpenAI 客户端，优先从 Secrets 读取，否则从 Sidebar 读取"""
-    api_key = None
-    base_url = None
+    api_key = get_config("API_KEY")
+    base_url = get_config("BASE_URL")
 
-    # 1. 尝试从 Secrets 读取
-    if "API_KEY" in st.secrets:
-        api_key = st.secrets["API_KEY"]
-        base_url = st.secrets["BASE_URL"]
-
-    # 2. 如果 Session 中有（用户在侧边栏输入的）
+    # 如果 Session 中有（用户在侧边栏输入的）
     if not api_key and "user_api_key" in st.session_state:
         api_key = st.session_state["user_api_key"]
         base_url = st.session_state["user_base_url"]
