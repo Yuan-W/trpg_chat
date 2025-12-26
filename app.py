@@ -145,7 +145,7 @@ def summarize_memory(client, model, messages_to_summarize, current_summary):
 
 # ================= 4. Mask 解析器 =================
 def parse_nextchat_mask(file_path):
-    """解析 NextChat 格式的 JSON"""
+    """解析 NextChat 格式的 JSON，支持扩展字段"""
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -177,8 +177,12 @@ def parse_nextchat_mask(file_path):
             "frequency_penalty": mc.get(
                 "frequency_penalty", DEFAULT_CONFIG["frequency_penalty"]
             ),
-            "historyMessageCount": mc.get("historyMessageCount", 10),
+            "historyMessageCount": mc.get("historyMessageCount", 20),
             "initial_messages": initial_messages,
+            # 新增扩展字段
+            "tailPrompt": mask_data.get("tailPrompt", ""),
+            "negativeConstraints": mask_data.get("negativeConstraints", []),
+            "glossary": mask_data.get("glossary", {}),
         }
         return config
     except Exception as e:
@@ -231,12 +235,25 @@ def load_from_local_storage():
                 if current_id and current_id in sessions:
                     st.session_state["current_session_id"] = current_id
                     sess = sessions[current_id]
-                    st.session_state.messages = sess.get("messages", copy.deepcopy(DEFAULT_CONFIG["initial_messages"]))
+                    
+                    # 恢复 current_script (用于加载 mask)
+                    script_path = sess.get("current_script")
+                    if script_path:
+                        st.session_state["current_script"] = script_path
+                        # 从文件加载最新的 mask_config (包括 system prompts)
+                        fresh_mask = parse_nextchat_mask(script_path)
+                        if fresh_mask:
+                            st.session_state["mask_config"] = fresh_mask
+                            # 合并: 新 system prompts + 保存的 user/assistant 对话
+                            system_msgs = fresh_mask.get("initial_messages", [])
+                            saved_msgs = sess.get("messages", [])
+                            st.session_state.messages = system_msgs + saved_msgs
+                        else:
+                            st.session_state.messages = sess.get("messages", copy.deepcopy(DEFAULT_CONFIG["initial_messages"]))
+                    else:
+                        st.session_state.messages = sess.get("messages", copy.deepcopy(DEFAULT_CONFIG["initial_messages"]))
+                    
                     st.session_state["long_term_memory"] = sess.get("long_term_memory", "")
-                    st.session_state["mask_config"] = sess.get("mask_config", DEFAULT_CONFIG)
-                    # 恢复 current_script 防止被侧边栏重置
-                    if "current_script" in sess:
-                        st.session_state["current_script"] = sess["current_script"]
                     
                     st.toast(f"已恢复会话: {sess.get('name', 'Unknown')}")
             except Exception as e:
@@ -280,13 +297,16 @@ def save_to_local_storage():
                 name = m["content"][:15]
                 break
     
+    # 只保存用户生成的数据，不保存 mask_config (会变旧) 和 initial_messages (从文件加载)
+    # 过滤掉 system messages，只保存 user/assistant 对话
+    user_messages = [m for m in st.session_state.messages if m["role"] != "system"]
+    
     sessions[session_id] = {
         "id": session_id,
         "name": name,
         "timestamp": time.time(),
-        "messages": st.session_state.messages,
+        "messages": user_messages,  # 只保存对话，不包含 system prompt
         "long_term_memory": st.session_state.get("long_term_memory", ""),
-        "mask_config": st.session_state.get("mask_config", DEFAULT_CONFIG),
         "current_script": st.session_state.get("current_script")
     }
     st.session_state["storage_data"]["current_session_id"] = session_id
@@ -416,10 +436,13 @@ with st.sidebar:
 
     if selected_file:
         # 如果当前没有配置，或者切换了文件，则重新加载
+        # 但如果刚刚从 LocalStorage 恢复了会话，不要覆盖
+        already_loaded = st.session_state.get("data_loaded") and len(st.session_state.get("messages", [])) > 1
+        
         if (
             "current_script" not in st.session_state
             or st.session_state["current_script"] != selected_file
-        ):
+        ) and not already_loaded:
             config_data = parse_nextchat_mask(selected_file)
             if config_data:
                 st.session_state["mask_config"] = config_data
@@ -479,18 +502,18 @@ with st.sidebar:
             label_visibility="collapsed"
         )
 
-        uploaded_save = st.file_uploader("读取存档 (.json)", type=["json"])
-        if uploaded_save:
-            if st.button("⚠️ 确认覆盖当前进度", type="primary"):
-                load_save_data(uploaded_save)
+        # uploaded_save = st.file_uploader("读取存档 (.json)", type=["json"])
+        # if uploaded_save:
+        #     if st.button("⚠️ 确认覆盖当前进度", type="primary"):
+        #         load_save_data(uploaded_save)
 
-        st.download_button(
-            label="⬇️ 导出所有数据",
-            data=export_save_data(),
-            file_name=f"Backup_{datetime.now().strftime('%Y%m%d')}.json",
-            mime="application/json",
-        )
-        st.caption("注：这会导出当前所有会话历史（Local Storage）")
+        # st.download_button(
+        #     label="⬇️ 导出所有数据",
+        #     data=export_save_data(),
+        #     file_name=f"Backup_{datetime.now().strftime('%Y%m%d')}.json",
+        #     mime="application/json",
+        # )
+        # st.caption("注：这会导出当前所有会话历史（Local Storage）")
 
 # ================= 6. 主聊天界面 =================
 mask_cfg = st.session_state.get("mask_config", {})
@@ -545,6 +568,8 @@ if prompt := st.chat_input("描述你的行动..."):
             msgs_to_keep = chat_msgs[-keep_count:]
 
             current_ltm = st.session_state.get("long_term_memory", "")
+            
+            print(f"DEBUG: Compressing {len(msgs_to_compress)} messages, keeping {len(msgs_to_keep)}")
 
             new_summary = summarize_memory(
                 client,
@@ -552,8 +577,10 @@ if prompt := st.chat_input("描述你的行动..."):
                 msgs_to_compress,
                 current_ltm,
             )
+            
+            print(f"DEBUG: summarize_memory returned: {type(new_summary)} - '{str(new_summary)[:100] if new_summary else 'EMPTY/NONE'}'...")
 
-            st.session_state["long_term_memory"] = new_summary
+            st.session_state["long_term_memory"] = new_summary if new_summary else ""
 
             # 重构消息列表：System + Remaining
             st.session_state.messages = system_msgs + msgs_to_keep
@@ -584,6 +611,42 @@ if prompt := st.chat_input("描述你的行动..."):
     for m in st.session_state.messages[1:]:
         clean_msg = {"role": m["role"], "content": m["content"]}
         final_messages.append(clean_msg)
+
+    # --- 注入扩展字段 (最后注入以增强效果) ---
+    
+    # 检查 mask_cfg 是否包含新字段，如果没有则尝试从文件重新加载
+    if not mask_cfg.get("glossary") and st.session_state.get("current_script"):
+        # 尝试从文件重新读取
+        refreshed = parse_nextchat_mask(st.session_state["current_script"])
+        if refreshed and refreshed.get("glossary"):
+            # 合并新字段到现有 config
+            mask_cfg["glossary"] = refreshed.get("glossary", {})
+            mask_cfg["negativeConstraints"] = refreshed.get("negativeConstraints", [])
+            mask_cfg["tailPrompt"] = refreshed.get("tailPrompt", "")
+            st.session_state["mask_config"] = mask_cfg
+            print("DEBUG: Refreshed mask_config with new fields from file")
+    
+    # (A) 术语对照表 (Glossary)
+    glossary = mask_cfg.get("glossary", {})
+    print(f"DEBUG: Glossary has {len(glossary)} entries")
+    if glossary:
+        glossary_text = "【术语对照 / Glossary】\n" + "\n".join([f"- {en}: {zh}" for en, zh in glossary.items()])
+        final_messages.append({"role": "system", "content": glossary_text})
+    
+    # (B) 负面约束 (Negative Constraints)
+    neg_constraints = mask_cfg.get("negativeConstraints", [])
+    print(f"DEBUG: negativeConstraints has {len(neg_constraints)} entries")
+    if neg_constraints:
+        constraints_text = "【禁止事项 / Negative Constraints】\n" + "\n".join([f"❌ {c}" for c in neg_constraints])
+        final_messages.append({"role": "system", "content": constraints_text})
+    
+    # (C) 尾部指令 (Tail Prompt) - 最后注入
+    tail_prompt = mask_cfg.get("tailPrompt", "")
+    print(f"DEBUG: tailPrompt = '{tail_prompt[:50]}...' " if tail_prompt else "DEBUG: tailPrompt is empty")
+    if tail_prompt:
+        final_messages.append({"role": "system", "content": tail_prompt})
+    
+    print(f"DEBUG: Total messages to send: {len(final_messages)}")
 
     # 3. AI 生成回复
     try:
