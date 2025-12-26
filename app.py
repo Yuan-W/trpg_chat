@@ -4,8 +4,10 @@ import random
 import os
 import copy
 import time
+import uuid
 from openai import OpenAI
 from datetime import datetime
+from streamlit_local_storage import LocalStorage
 
 # ================= 1. 基础配置与工具函数 =================
 st.set_page_config(page_title="暗夜刀锋 GM", page_icon="🗡️", layout="wide")
@@ -80,9 +82,15 @@ def get_api_client():
 
 # ================= 2. 存档系统 =================
 def export_save_data():
+    # 优先导出整个 Local Storage 中的数据
+    if "storage_data" in st.session_state:
+        return json.dumps(st.session_state["storage_data"], ensure_ascii=False, indent=2)
+    
+    # Fallback 到当前单次会话
     save_data = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "messages": st.session_state.messages,
+
         "long_term_memory": st.session_state.get("long_term_memory", ""),
         "mask_config": st.session_state.get("mask_config", DEFAULT_CONFIG),
     }
@@ -183,24 +191,178 @@ def get_mask_files():
     if not os.path.exists(folder):
         try:
             os.makedirs(folder)
-            # 创建一个示例文本
             with open(os.path.join(folder, "readme.txt"), "w") as f:
                 f.write("请将 NextChat 导出的 JSON 文件放入此文件夹")
         except:
-            return []  # 权限不足等情况，回退
+            return []
 
     files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".json")]
     return files
 
-# ================= 5. 侧边栏与初始化 =================
 
-# 初始化 Session State
+# ================= 5. LocalStorage Manager =================
+KEY_LOCAL_STORAGE = "trpg_chat_data_v1"
+
+# 初始化 LocalStorage 实例
+localS = LocalStorage()
+
+def load_from_local_storage():
+    """从浏览器读取数据 (仅在初始化时调用)"""
+    # 如果已经加载过，直接返回
+    if st.session_state.get("data_loaded", False):
+        return
+
+    # 使用 streamlit-local-storage 的 getItem
+    data_str = localS.getItem(KEY_LOCAL_STORAGE)
+    
+    # 逻辑优化：处理异步加载
+    if data_str is not None:
+        # 情况 A: 成功读取到数据
+        st.session_state["data_loaded"] = True
+        st.session_state["load_retries"] = 0 # reset
+        if data_str and isinstance(data_str, str):
+            try:
+                data = json.loads(data_str)
+                st.session_state["storage_data"] = data
+                # 恢复当前会话
+                current_id = data.get("current_session_id")
+                sessions = data.get("sessions", {})
+                
+                if current_id and current_id in sessions:
+                    st.session_state["current_session_id"] = current_id
+                    sess = sessions[current_id]
+                    st.session_state.messages = sess.get("messages", copy.deepcopy(DEFAULT_CONFIG["initial_messages"]))
+                    st.session_state["long_term_memory"] = sess.get("long_term_memory", "")
+                    st.session_state["mask_config"] = sess.get("mask_config", DEFAULT_CONFIG)
+                    # 恢复 current_script 防止被侧边栏重置
+                    if "current_script" in sess:
+                        st.session_state["current_script"] = sess["current_script"]
+                    
+                    st.toast(f"已恢复会话: {sess.get('name', 'Unknown')}")
+            except Exception as e:
+                st.error(f"读取存档失败: {e}")
+    else:
+        # 情况 B: 读取为 None (可能是加载中，也可能是 Key 不存在)
+        # 增加重试计数，防止无限等待导致新用户无法 Save
+        retries = st.session_state.get("load_retries", 0) + 1
+        st.session_state["load_retries"] = retries
+        print(f"DEBUG: Load returned None. Retry count: {retries}")
+        
+        # 认为超过 2 次就是真的没有数据 (新用户)
+        if retries > 2:
+            print("DEBUG: Assumed New User (Empty Storage). Enabling Save.")
+            st.session_state["data_loaded"] = True
+
+def save_to_local_storage():
+    """将当前状态保存到 storage_data 并写入浏览器"""
+    # 关键修复：如果必须等待加载完成才能保存，否则会覆盖掉旧数据
+    if not st.session_state.get("data_loaded", False):
+        print("DEBUG: Skipping save because data not loaded yet.")
+        return
+
+    if "current_session_id" not in st.session_state:
+        create_new_session()
+        
+    session_id = st.session_state["current_session_id"]
+    
+    # 1. 更新内存中的 storage_data
+    if "storage_data" not in st.session_state:
+        st.session_state["storage_data"] = {"sessions": {}, "current_session_id": session_id}
+        
+    sessions = st.session_state["storage_data"]["sessions"]
+    
+    # 提取对话摘要作为标题
+    name = "新会话"
+    if len(st.session_state.messages) > 1:
+        # 取第一条 User 消息的前 15 个字
+        for m in st.session_state.messages:
+            if m["role"] == "user":
+                name = m["content"][:15]
+                break
+    
+    sessions[session_id] = {
+        "id": session_id,
+        "name": name,
+        "timestamp": time.time(),
+        "messages": st.session_state.messages,
+        "long_term_memory": st.session_state.get("long_term_memory", ""),
+        "mask_config": st.session_state.get("mask_config", DEFAULT_CONFIG),
+        "current_script": st.session_state.get("current_script")
+    }
+    st.session_state["storage_data"]["current_session_id"] = session_id
+    
+    # 2. 使用 streamlit-local-storage 的 setItem 保存
+    json_str = json.dumps(st.session_state["storage_data"], ensure_ascii=False)
+    # 使用唯一 key 避免 Streamlit 的 duplicate key 错误
+    save_key = f"save_{int(time.time()*1000)}"
+    localS.setItem(KEY_LOCAL_STORAGE, json_str, key=save_key)
+
+def create_new_session():
+    new_id = str(uuid.uuid4())
+    st.session_state["current_session_id"] = new_id
+    
+    # 逻辑优化: 确定使用哪套配置
+    # 1. 如果当前已经加载了某个剧本 (current_script exists), 则继承之 (Mask config & persistence)
+    # 2. 如果当前是 Default (current_script None), 但 masks 文件夹里有文件, 则默认加载第一个文件 (Selection 0)
+    # 3. 否则才使用纯净的 DEFAULT_CONFIG
+    
+    config_to_use = DEFAULT_CONFIG
+    
+    if st.session_state.get("current_script"):
+        config_to_use = st.session_state.get("mask_config", DEFAULT_CONFIG)
+    else:
+        files = get_mask_files()
+        if files:
+            # 尝试加载第一个文件
+            first_file = files[0]
+            parsed = parse_nextchat_mask(first_file)
+            if parsed:
+                config_to_use = parsed
+                st.session_state["current_script"] = first_file
+
+    st.session_state.messages = copy.deepcopy(config_to_use.get("initial_messages", DEFAULT_CONFIG["initial_messages"]))
+    st.session_state["long_term_memory"] = ""
+    st.session_state["mask_config"] = copy.deepcopy(config_to_use)
+    
+    return new_id
+
+def delete_session(session_id):
+    if "storage_data" in st.session_state:
+        sessions = st.session_state["storage_data"].get("sessions", {})
+        if session_id in sessions:
+            del sessions[session_id]
+            # 如果删除了当前会话，新建一个
+            if st.session_state.get("current_session_id") == session_id:
+                create_new_session()
+            save_to_local_storage()
+            st.rerun()
+
+def switch_session(session_id):
+    if "storage_data" in st.session_state:
+        sessions = st.session_state["storage_data"].get("sessions", {})
+        if session_id in sessions:
+            sess = sessions[session_id]
+            st.session_state["current_session_id"] = session_id
+            st.session_state.messages = sess.get("messages", [])
+            st.session_state["long_term_memory"] = sess.get("long_term_memory", "")
+            st.session_state["mask_config"] = sess.get("mask_config", DEFAULT_CONFIG)
+            save_to_local_storage() # 更新 timestamp
+            st.rerun()
+
+# ================= 6. 初始化与侧边栏 =================
+
+# 0. 加载本地存储 (最优先)
+load_from_local_storage()
+
+# 1. 初始化 Session State
 if "messages" not in st.session_state:
     st.session_state.messages = copy.deepcopy(DEFAULT_CONFIG["initial_messages"])
 if "long_term_memory" not in st.session_state:
     st.session_state["long_term_memory"] = ""
 if "mask_config" not in st.session_state:
     st.session_state["mask_config"] = copy.deepcopy(DEFAULT_CONFIG)
+if "current_session_id" not in st.session_state:
+    create_new_session()
 
 with st.sidebar:
     st.title("控制台")
@@ -217,11 +379,39 @@ with st.sidebar:
                 st.rerun()
         st.stop()  # 停止渲染主界面
 
-    # --- 🎭 剧本管理 ---
+    # --- 📚 会话管理 (NextChat style) ---
+    st.subheader("💬 会话历史")
+    
+    if st.button("➕ 新建对话", use_container_width=True):
+        create_new_session()
+        st.rerun()
 
+    sessions = st.session_state.get("storage_data", {}).get("sessions", {})
+    # 按时间倒序
+    sorted_sessions = sorted(sessions.values(), key=lambda x: x.get("timestamp", 0), reverse=True)
+    
+    # 显示最近 10 条
+    for s in sorted_sessions[:10]:
+        col1, col2 = st.columns([4, 1])
+        with col1:
+             # 当前会话高亮
+            label = s.get("name", "未命名")
+            if s["id"] == st.session_state.get("current_session_id"):
+                st.info(f"📌 {label}")
+            else:
+                if st.button(label, key=f"btn_{s['id']}"):
+                    switch_session(s["id"])
+        with col2:
+            if st.button("x", key=f"del_{s['id']}", help="删除"):
+                delete_session(s["id"])
+
+    st.divider()
+
+    # --- 🎭 剧本管理 ---
+    st.write("📖 **剧本导入**")
     mask_files = get_mask_files()
     selected_file = (
-        st.selectbox("📚 选择剧本文件:", mask_files, index=0, format_func=lambda x: os.path.basename(x)) if mask_files else None
+        st.selectbox("选择剧本文件:", mask_files, index=0, format_func=lambda x: os.path.basename(x)) if mask_files else None
     )
 
     if selected_file:
@@ -239,6 +429,7 @@ with st.sidebar:
                 )
                 st.session_state["long_term_memory"] = ""
                 st.success(f"已装载: {config_data['name']}")
+                save_to_local_storage() # 加载剧本也自动保存
                 time.sleep(0.5)
                 st.rerun()
 
@@ -272,6 +463,9 @@ with st.sidebar:
                 }
             )
         st.rerun()
+        
+    # Auto-save dice roll
+    save_to_local_storage()
 
     # --- 💾 存档管理 ---
     st.divider()
@@ -282,6 +476,7 @@ with st.sidebar:
             value=st.session_state.get("long_term_memory", ""),
             height=100,
             disabled=True,
+            label_visibility="collapsed"
         )
 
         uploaded_save = st.file_uploader("读取存档 (.json)", type=["json"])
@@ -290,11 +485,12 @@ with st.sidebar:
                 load_save_data(uploaded_save)
 
         st.download_button(
-            label="⬇️ 下载当前存档",
+            label="⬇️ 导出所有数据",
             data=export_save_data(),
-            file_name=f"Save_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+            file_name=f"Backup_{datetime.now().strftime('%Y%m%d')}.json",
             mime="application/json",
         )
+        st.caption("注：这会导出当前所有会话历史（Local Storage）")
 
 # ================= 6. 主聊天界面 =================
 mask_cfg = st.session_state.get("mask_config", {})
@@ -326,19 +522,24 @@ if prompt := st.chat_input("描述你的行动..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user", avatar="👤"):
         st.markdown(prompt)
+    
+    # 立即保存用户消息
+    save_to_local_storage()
 
     # 2. 准备上下文
     mask_cfg = st.session_state["mask_config"]
 
-    # --- 记忆压缩逻辑 ---
-    threshold = mask_cfg.get("historyMessageCount", 10)
-    keep_count = int(threshold / 3)
+    # --- 记忆压缩逻辑 (TRPG 优化版) ---
+    # historyMessageCount: 发送给 AI 的最大消息数
+    # 当消息超过该阈值+缓冲区时，压缩旧消息为 long_term_memory
+    threshold = mask_cfg.get("historyMessageCount", 20)  # 提高默认值，适合 TRPG 长对话
+    keep_count = max(int(threshold / 2), 5)  # 保留至少一半或 5 条，确保上下文连贯
 
     all_messages = st.session_state.messages
     system_msgs = [m for m in all_messages if m["role"] == "system"]
     chat_msgs = [m for m in all_messages if m["role"] != "system"]
 
-    if len(chat_msgs) > (threshold + 5):
+    if len(chat_msgs) > (threshold + 3):  # 更早触发压缩 (+3 而非 +5)
         with st.status("🧠 正在整理记忆...", expanded=True) as status:
             msgs_to_compress = chat_msgs[:-keep_count]  # 保留最后 N 条，压缩前面的
             msgs_to_keep = chat_msgs[-keep_count:]
@@ -360,6 +561,9 @@ if prompt := st.chat_input("描述你的行动..."):
             chat_msgs = msgs_to_keep
 
             status.update(label="记忆已更新", state="complete", expanded=False)
+            
+            # 压缩后立即保存，防止刷新丢失
+            save_to_local_storage()
 
     # --- 构建最终 Prompt ---
     final_messages = []
@@ -398,6 +602,8 @@ if prompt := st.chat_input("描述你的行动..."):
                 response = st.write_stream(stream)
 
         st.session_state.messages.append({"role": "assistant", "content": response})
+        # 保存 AI 回复
+        save_to_local_storage()
 
     except Exception as e:
         st.error(f"API 请求失败: {e}")
