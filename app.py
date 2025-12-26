@@ -52,7 +52,7 @@ def get_config(key, default=None):
     value = os.environ.get(key)
     if value:
         return value
-    
+
     # 2. 尝试 st.secrets (Local)
     # 注意：st.secrets 可能会报错如果key不存在，所以用 .get()
     try:
@@ -60,7 +60,7 @@ def get_config(key, default=None):
             return st.secrets[key]
     except FileNotFoundError:
         pass # 本地没有 secrets.toml 文件
-        
+
     return default
 
 
@@ -85,7 +85,7 @@ def export_save_data():
     # 优先导出整个 Local Storage 中的数据
     if "storage_data" in st.session_state:
         return json.dumps(st.session_state["storage_data"], ensure_ascii=False, indent=2)
-    
+
     # Fallback 到当前单次会话
     save_data = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -218,7 +218,7 @@ def load_from_local_storage():
 
     # 使用 streamlit-local-storage 的 getItem
     data_str = localS.getItem(KEY_LOCAL_STORAGE)
-    
+
     # 逻辑优化：处理异步加载
     if data_str is not None:
         # 情况 A: 成功读取到数据
@@ -231,11 +231,11 @@ def load_from_local_storage():
                 # 恢复当前会话
                 current_id = data.get("current_session_id")
                 sessions = data.get("sessions", {})
-                
+
                 if current_id and current_id in sessions:
                     st.session_state["current_session_id"] = current_id
                     sess = sessions[current_id]
-                    
+
                     # 恢复 current_script (用于加载 mask)
                     script_path = sess.get("current_script")
                     if script_path:
@@ -252,9 +252,9 @@ def load_from_local_storage():
                             st.session_state.messages = sess.get("messages", copy.deepcopy(DEFAULT_CONFIG["initial_messages"]))
                     else:
                         st.session_state.messages = sess.get("messages", copy.deepcopy(DEFAULT_CONFIG["initial_messages"]))
-                    
+
                     st.session_state["long_term_memory"] = sess.get("long_term_memory", "")
-                    
+
                     st.toast(f"已恢复会话: {sess.get('name', 'Unknown')}")
             except Exception as e:
                 st.error(f"读取存档失败: {e}")
@@ -264,7 +264,7 @@ def load_from_local_storage():
         retries = st.session_state.get("load_retries", 0) + 1
         st.session_state["load_retries"] = retries
         print(f"DEBUG: Load returned None. Retry count: {retries}")
-        
+
         # 认为超过 2 次就是真的没有数据 (新用户)
         if retries > 2:
             print("DEBUG: Assumed New User (Empty Storage). Enabling Save.")
@@ -279,15 +279,15 @@ def save_to_local_storage():
 
     if "current_session_id" not in st.session_state:
         create_new_session()
-        
+
     session_id = st.session_state["current_session_id"]
-    
+
     # 1. 更新内存中的 storage_data
     if "storage_data" not in st.session_state:
         st.session_state["storage_data"] = {"sessions": {}, "current_session_id": session_id}
-        
+
     sessions = st.session_state["storage_data"]["sessions"]
-    
+
     # 提取对话摘要作为标题
     name = "新会话"
     if len(st.session_state.messages) > 1:
@@ -296,11 +296,11 @@ def save_to_local_storage():
             if m["role"] == "user":
                 name = m["content"][:15]
                 break
-    
+
     # 只保存用户生成的数据，不保存 mask_config (会变旧) 和 initial_messages (从文件加载)
     # 过滤掉 system messages，只保存 user/assistant 对话
     user_messages = [m for m in st.session_state.messages if m["role"] != "system"]
-    
+
     sessions[session_id] = {
         "id": session_id,
         "name": name,
@@ -310,7 +310,7 @@ def save_to_local_storage():
         "current_script": st.session_state.get("current_script")
     }
     st.session_state["storage_data"]["current_session_id"] = session_id
-    
+
     # 2. 使用 streamlit-local-storage 的 setItem 保存
     json_str = json.dumps(st.session_state["storage_data"], ensure_ascii=False)
     # 使用唯一 key 避免 Streamlit 的 duplicate key 错误
@@ -320,14 +320,14 @@ def save_to_local_storage():
 def create_new_session():
     new_id = str(uuid.uuid4())
     st.session_state["current_session_id"] = new_id
-    
+
     # 逻辑优化: 确定使用哪套配置
     # 1. 如果当前已经加载了某个剧本 (current_script exists), 则继承之 (Mask config & persistence)
     # 2. 如果当前是 Default (current_script None), 但 masks 文件夹里有文件, 则默认加载第一个文件 (Selection 0)
     # 3. 否则才使用纯净的 DEFAULT_CONFIG
-    
+
     config_to_use = DEFAULT_CONFIG
-    
+
     if st.session_state.get("current_script"):
         config_to_use = st.session_state.get("mask_config", DEFAULT_CONFIG)
     else:
@@ -343,7 +343,7 @@ def create_new_session():
     st.session_state.messages = copy.deepcopy(config_to_use.get("initial_messages", DEFAULT_CONFIG["initial_messages"]))
     st.session_state["long_term_memory"] = ""
     st.session_state["mask_config"] = copy.deepcopy(config_to_use)
-    
+
     return new_id
 
 def delete_session(session_id):
@@ -401,7 +401,7 @@ with st.sidebar:
 
     # --- 📚 会话管理 (NextChat style) ---
     st.subheader("💬 会话历史")
-    
+
     if st.button("➕ 新建对话", use_container_width=True):
         create_new_session()
         st.rerun()
@@ -409,7 +409,7 @@ with st.sidebar:
     sessions = st.session_state.get("storage_data", {}).get("sessions", {})
     # 按时间倒序
     sorted_sessions = sorted(sessions.values(), key=lambda x: x.get("timestamp", 0), reverse=True)
-    
+
     # 显示最近 10 条
     for s in sorted_sessions[:10]:
         col1, col2 = st.columns([4, 1])
@@ -438,7 +438,7 @@ with st.sidebar:
         # 如果当前没有配置，或者切换了文件，则重新加载
         # 但如果刚刚从 LocalStorage 恢复了会话，不要覆盖
         already_loaded = st.session_state.get("data_loaded") and len(st.session_state.get("messages", [])) > 1
-        
+
         if (
             "current_script" not in st.session_state
             or st.session_state["current_script"] != selected_file
@@ -486,21 +486,25 @@ with st.sidebar:
                 }
             )
         st.rerun()
-        
+
     # Auto-save dice roll
     save_to_local_storage()
 
     # --- 💾 存档管理 ---
     st.divider()
     with st.expander("💾 记忆与存档", expanded=False):
-        st.caption("🧠 长期记忆摘要：")
-        st.text_area(
-            "Memory",
-            value=st.session_state.get("long_term_memory", ""),
-            height=100,
-            disabled=True,
-            label_visibility="collapsed"
-        )
+        ltm = st.session_state.get("long_term_memory", "")
+        st.caption(f"🧠 长期记忆摘要 ({len(ltm)} 字)：")
+        if ltm:
+            st.text_area(
+                "Memory",
+                value=ltm,
+                height=200,  # 增加高度
+                disabled=True,
+                label_visibility="collapsed"
+            )
+        else:
+            st.info("暂无压缩记忆。对话超过 ~25 条时会自动生成摘要。")
 
         # uploaded_save = st.file_uploader("读取存档 (.json)", type=["json"])
         # if uploaded_save:
@@ -545,7 +549,7 @@ if prompt := st.chat_input("描述你的行动..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user", avatar="👤"):
         st.markdown(prompt)
-    
+
     # 立即保存用户消息
     save_to_local_storage()
 
@@ -568,7 +572,7 @@ if prompt := st.chat_input("描述你的行动..."):
             msgs_to_keep = chat_msgs[-keep_count:]
 
             current_ltm = st.session_state.get("long_term_memory", "")
-            
+
             print(f"DEBUG: Compressing {len(msgs_to_compress)} messages, keeping {len(msgs_to_keep)}")
 
             new_summary = summarize_memory(
@@ -577,7 +581,7 @@ if prompt := st.chat_input("描述你的行动..."):
                 msgs_to_compress,
                 current_ltm,
             )
-            
+
             print(f"DEBUG: summarize_memory returned: {type(new_summary)} - '{str(new_summary)[:100] if new_summary else 'EMPTY/NONE'}'...")
 
             st.session_state["long_term_memory"] = new_summary if new_summary else ""
@@ -587,8 +591,13 @@ if prompt := st.chat_input("描述你的行动..."):
 
             chat_msgs = msgs_to_keep
 
-            status.update(label="记忆已更新", state="complete", expanded=False)
-            
+            # 显示压缩结果摘要
+            st.write(f"**已压缩 {len(msgs_to_compress)} 条消息**")
+            if new_summary:
+                st.text_area("新摘要预览", value=new_summary[:500] + "...", height=150, disabled=True)
+
+            status.update(label="✅ 记忆已更新", state="complete", expanded=False)
+
             # 压缩后立即保存，防止刷新丢失
             save_to_local_storage()
 
@@ -613,7 +622,7 @@ if prompt := st.chat_input("描述你的行动..."):
         final_messages.append(clean_msg)
 
     # --- 注入扩展字段 (最后注入以增强效果) ---
-    
+
     # 检查 mask_cfg 是否包含新字段，如果没有则尝试从文件重新加载
     if not mask_cfg.get("glossary") and st.session_state.get("current_script"):
         # 尝试从文件重新读取
@@ -625,27 +634,27 @@ if prompt := st.chat_input("描述你的行动..."):
             mask_cfg["tailPrompt"] = refreshed.get("tailPrompt", "")
             st.session_state["mask_config"] = mask_cfg
             print("DEBUG: Refreshed mask_config with new fields from file")
-    
+
     # (A) 术语对照表 (Glossary)
     glossary = mask_cfg.get("glossary", {})
     print(f"DEBUG: Glossary has {len(glossary)} entries")
     if glossary:
         glossary_text = "【术语对照 / Glossary】\n" + "\n".join([f"- {en}: {zh}" for en, zh in glossary.items()])
         final_messages.append({"role": "system", "content": glossary_text})
-    
+
     # (B) 负面约束 (Negative Constraints)
     neg_constraints = mask_cfg.get("negativeConstraints", [])
     print(f"DEBUG: negativeConstraints has {len(neg_constraints)} entries")
     if neg_constraints:
         constraints_text = "【禁止事项 / Negative Constraints】\n" + "\n".join([f"❌ {c}" for c in neg_constraints])
         final_messages.append({"role": "system", "content": constraints_text})
-    
+
     # (C) 尾部指令 (Tail Prompt) - 最后注入
     tail_prompt = mask_cfg.get("tailPrompt", "")
     print(f"DEBUG: tailPrompt = '{tail_prompt[:50]}...' " if tail_prompt else "DEBUG: tailPrompt is empty")
     if tail_prompt:
         final_messages.append({"role": "system", "content": tail_prompt})
-    
+
     print(f"DEBUG: Total messages to send: {len(final_messages)}")
 
     # 3. AI 生成回复
