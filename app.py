@@ -506,18 +506,18 @@ with st.sidebar:
         else:
             st.info("暂无压缩记忆。对话超过 ~25 条时会自动生成摘要。")
 
-        # uploaded_save = st.file_uploader("读取存档 (.json)", type=["json"])
-        # if uploaded_save:
-        #     if st.button("⚠️ 确认覆盖当前进度", type="primary"):
-        #         load_save_data(uploaded_save)
+        uploaded_save = st.file_uploader("读取存档 (.json)", type=["json"])
+        if uploaded_save:
+            if st.button("⚠️ 确认覆盖当前进度", type="primary"):
+                load_save_data(uploaded_save)
 
-        # st.download_button(
-        #     label="⬇️ 导出所有数据",
-        #     data=export_save_data(),
-        #     file_name=f"Backup_{datetime.now().strftime('%Y%m%d')}.json",
-        #     mime="application/json",
-        # )
-        # st.caption("注：这会导出当前所有会话历史（Local Storage）")
+        st.download_button(
+            label="⬇️ 导出所有数据",
+            data=export_save_data(),
+            file_name=f"Backup_{datetime.now().strftime('%Y%m%d')}.json",
+            mime="application/json",
+        )
+        st.caption("注：这会导出当前所有会话历史")
 
 # ================= 6. 主聊天界面 =================
 mask_cfg = st.session_state.get("mask_config", {})
