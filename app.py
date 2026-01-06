@@ -100,6 +100,47 @@ def export_save_data():
 def load_save_data(uploaded_file):
     try:
         data = json.load(uploaded_file)
+        
+        # 情况 1: 全量备份 (包含 "sessions")
+        if "sessions" in data:
+            st.session_state["storage_data"] = data
+            st.session_state["data_loaded"] = True  # 标记为已加载，允许保存
+
+            # 尝试恢复当前会话
+            current_id = data.get("current_session_id")
+            sessions = data.get("sessions", {})
+
+            if current_id and current_id in sessions:
+                st.session_state["current_session_id"] = current_id
+                sess = sessions[current_id]
+
+                # 恢复 current_script
+                script_path = sess.get("current_script")
+                
+                # 准备消息 (System + History)
+                system_msgs = copy.deepcopy(DEFAULT_CONFIG["initial_messages"])
+                
+                if script_path:
+                    st.session_state["current_script"] = script_path
+                    fresh_mask = parse_nextchat_mask(script_path)
+                    if fresh_mask:
+                        st.session_state["mask_config"] = fresh_mask
+                        system_msgs = fresh_mask.get("initial_messages", [])
+
+                saved_msgs = sess.get("messages", [])
+                st.session_state.messages = system_msgs + saved_msgs
+                st.session_state["long_term_memory"] = sess.get("long_term_memory", "")
+                
+                st.toast(f"✅ 全局存档已加载！恢复会话: {sess.get('name', 'Unknown')}")
+            else:
+                st.toast("✅ 全局存档已加载！(未找到活跃会话)")
+
+            save_to_local_storage() # 同步到浏览器
+            time.sleep(1)
+            st.rerun()
+            return
+
+        # 情况 2: 单次会话备份 (包含 "messages")
         if "messages" not in data:
             raise ValueError("缺少消息记录")
 
@@ -107,7 +148,9 @@ def load_save_data(uploaded_file):
         st.session_state["long_term_memory"] = data.get("long_term_memory", "")
         # 兼容旧存档，如果没有 config 则使用默认
         st.session_state["mask_config"] = data.get("mask_config", DEFAULT_CONFIG)
-        st.toast(f"✅ 存档已加载！时间: {data['timestamp']}")
+        
+        st.toast(f"✅ 存档已加载！时间: {data.get('timestamp', 'Unknown')}")
+        save_to_local_storage() # 保存为当前会话
         time.sleep(1)
         st.rerun()
     except Exception as e:
