@@ -24,6 +24,23 @@ st.markdown(
         border: 1px solid #ddd;
         margin-bottom: 10px;
     }
+    
+    /* FileUploader 汉化 */
+    [data-testid="stFileUploaderDropzone"] div div span {
+       display: none;
+    }
+    [data-testid="stFileUploaderDropzone"] div div::after {
+       content: "点击或拖拽文件至此";
+       font-size: 0.8em;
+    }
+    [data-testid="stFileUploaderDropzone"] div div small {
+       display: none;
+    }
+    
+    /* Browse files button HACK - Hide it */
+    [data-testid="stFileUploaderDropzone"] button {
+        display: none !important;
+    }
 </style>
 """,
     unsafe_allow_html=True,
